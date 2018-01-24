@@ -35,6 +35,7 @@ using System.Text;
 using System.Net;
 using System.Web;
 using System.Security.Cryptography;
+using ServiceStack.Logging;
 using ServiceStack.Text;
 
 namespace ServiceStack.Auth
@@ -65,6 +66,11 @@ namespace ServiceStack.Auth
     //
     public class OAuthAuthorizer
     {
+        private static ILog log = LogManager.GetLogger(typeof(OAuthAuthorizer));
+
+        // No issue has been reported with Twitter OAuth, but alt OAuth providers may require lexical ordering
+        public static bool OrderHeadersLexically = false;
+
         // Settable by the user
         public string xAuthUsername, xAuthPassword;
 
@@ -107,12 +113,21 @@ namespace ServiceStack.Auth
         // Makes an OAuth signature out of the HTTP method, the base URI and the headers
         static string MakeSignature(string method, string base_uri, Dictionary<string, string> headers)
         {
-            var items = from k in headers.Keys
-                        orderby k
-                        select k + "%3D" + OAuthUtils.PercentEncode(headers[k]);
+            var emptyHeaders = headers.Keys.Where(k => string.IsNullOrEmpty(headers[k])).ToArray();
+            if (emptyHeaders.Length > 0)
+            {
+                log.Warn("Empty Headers: " + string.Join(", ", emptyHeaders));
+            }
 
-            return method + "&" + OAuthUtils.PercentEncode(base_uri) + "&" +
-                string.Join("%26", items.ToArray());
+            var sortedHeaders = !OrderHeadersLexically
+                ? headers.Keys.OrderBy(k => k)
+                : headers.Keys.OrderBy(k => k, StringComparer.Ordinal);
+
+            var items = sortedHeaders.Select(k => k + "%3D" + OAuthUtils.PercentEncode(headers[k]));
+
+            return method 
+                + "&" + OAuthUtils.PercentEncode(base_uri) 
+                + "&" + string.Join("%26", items.ToArray());
         }
 
         static string MakeSigningKey(string consumerSecret, string oauthTokenSecret)
@@ -134,13 +149,15 @@ namespace ServiceStack.Auth
 
         public bool AcquireRequestToken()
         {
-            var headers = new Dictionary<string, string>() {
+            var headers = new Dictionary<string, string>
+            {
                 { "oauth_callback", OAuthUtils.PercentEncode (provider.CallbackUrl) },
                 { "oauth_consumer_key", provider.ConsumerKey },
                 { "oauth_nonce", MakeNonce () },
                 { "oauth_signature_method", "HMAC-SHA1" },
                 { "oauth_timestamp", MakeTimestamp () },
-                { "oauth_version", "1.0" }};
+                { "oauth_version", "1.0" }
+            };
 
             var uri = new Uri(provider.RequestTokenUrl);
 
@@ -336,6 +353,9 @@ namespace ServiceStack.Auth
         //
         public static string PercentEncode(string s)
         {
+            if (string.IsNullOrEmpty(s))
+                return s;
+            
             var sb = StringBuilderCache.Allocate();
 
             foreach (byte c in Encoding.UTF8.GetBytes(s))

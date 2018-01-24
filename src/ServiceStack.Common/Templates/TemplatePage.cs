@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using ServiceStack.IO;
 using ServiceStack.Text;
-#if NETSTANDARD1_3
+#if NETSTANDARD2_0
 using Microsoft.Extensions.Primitives;
 #endif
 
@@ -22,6 +23,7 @@ namespace ServiceStack.Templates
         public DateTime LastModified { get; set; }
         public DateTime LastModifiedCheck { get; private set; }
         public bool HasInit { get; private set; }
+        public bool IsLayout { get; private set; }
 
         public TemplateContext Context { get; }
         public PageFormat Format { get; }
@@ -96,8 +98,20 @@ namespace ServiceStack.Templates
                 bodyContents = fileContents.SafeSubsegment(pos).AdvancePastWhitespace();
             }
 
-            var pageFragments = TemplatePageUtils.ParseTemplatePage(bodyContents);
+            var pageFragments = pageVars.TryGetValue("ignore", out object ignore) 
+                    && ("page".Equals(ignore.ToString()) || "template".Equals(ignore.ToString()))
+                ? new List<PageFragment> { new PageStringFragment(bodyContents) } 
+                : TemplatePageUtils.ParseTemplatePage(bodyContents);
 
+            foreach (var fragment in pageFragments)
+            {
+                if (fragment is PageVariableFragment var && var.BindingString == TemplateConstants.Page)
+                {
+                    IsLayout = true;
+                    break;
+                }
+            }
+            
             lock (semaphore)
             {
                 LastModified = lastModified;

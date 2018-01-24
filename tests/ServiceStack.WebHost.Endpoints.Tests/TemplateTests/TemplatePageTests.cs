@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,6 +10,7 @@ using ServiceStack.DataAnnotations;
 using ServiceStack.IO;
 using ServiceStack.Templates;
 using ServiceStack.IO;
+using ServiceStack.Text;
 using ServiceStack.VirtualPath;
 
 namespace ServiceStack.WebHost.Endpoints.Tests.TemplateTests
@@ -63,7 +65,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.TemplateTests
         class AppHost : AppSelfHostBase
         {
             public AppHost()
-                : base(nameof(TemplatePageTests), typeof(TemplatePagesService).GetAssembly()) { }
+                : base(nameof(TemplatePageTests), typeof(TemplatePagesService).Assembly) { }
 
             public override void Configure(Container container)
             {
@@ -409,13 +411,15 @@ title: We encode < & >
                 TemplateFilters = { new TemplateProtectedFilters() }
             }.Init();
 
-            context.VirtualFiles.WriteFile("_layout.html", "layout {{ page }}");
+            context.VirtualFiles.WriteFile("_layout.html", "layout {{ page }} {{ 'layout-partial' | partial }}  {{ 'layout-file.txt' | includeFile }} ");
             context.VirtualFiles.WriteFile("page.html", "page: partial {{ 'root-partial' | partial }}, file {{ 'file.txt' | includeFile }}, selectParital: {{ true | selectPartial: select-partial }}");
             context.VirtualFiles.WriteFile("root-partial.html", "root-partial: partial {{ 'inner-partial' | partial }}, partial-file {{ 'partial-file.txt' | includeFile }}");
             context.VirtualFiles.WriteFile("file.txt", "file.txt");
             context.VirtualFiles.WriteFile("inner-partial.html", "inner-partial.html");
             context.VirtualFiles.WriteFile("partial-file.txt", "partial-file.txt");
             context.VirtualFiles.WriteFile("select-partial.html", "select-partial.html");
+            context.VirtualFiles.WriteFile("layout-partial.html", "layout-partial.html");
+            context.VirtualFiles.WriteFile("layout-file.txt", "layout-file.txt");
 
             ((InMemoryVirtualFile)context.VirtualFiles.GetFile("page.html")).FileLastModified = new DateTime(2001, 01, 01);
             ((InMemoryVirtualFile)context.VirtualFiles.GetFile("_layout.html")).FileLastModified = new DateTime(2001, 01, 02);
@@ -424,14 +428,64 @@ title: We encode < & >
             ((InMemoryVirtualFile)context.VirtualFiles.GetFile("inner-partial.html")).FileLastModified = new DateTime(2001, 01, 05);
             ((InMemoryVirtualFile)context.VirtualFiles.GetFile("partial-file.txt")).FileLastModified = new DateTime(2001, 01, 06);
             ((InMemoryVirtualFile)context.VirtualFiles.GetFile("select-partial.html")).FileLastModified = new DateTime(2001, 01, 07);
+            ((InMemoryVirtualFile)context.VirtualFiles.GetFile("layout-partial.html")).FileLastModified = new DateTime(2001, 01, 08);
+            ((InMemoryVirtualFile)context.VirtualFiles.GetFile("layout-file.txt")).FileLastModified = new DateTime(2001, 01, 09);
 
             var page = context.Pages.GetPage("page").Init().Result;
             context.Pages.GetPage("root-partial").Init().Wait();
 
             var lastModified = context.Pages.GetLastModified(page);
-            Assert.That(lastModified, Is.EqualTo(new DateTime(2001, 01, 07)));
+            Assert.That(lastModified, Is.EqualTo(new DateTime(2001, 01, 09)));
         }
 
+        public class AsyncFilters : TemplateFilter
+        {
+            public async Task<object> reverseString(string text)
+            {
+                await Task.Yield();
+                var chars = text.ToCharArray();
+                Array.Reverse(chars);
+                return new string(chars);            
+            }
+        }
+
+        [Test]
+        public void Can_call_async_filters()
+        {
+            var context = new TemplateContext
+            {
+                TemplateFilters = { new AsyncFilters() }
+            }.Init();
+
+            var output = context.EvaluateTemplate("{{ 'foo' | reverseString }}");
+            Assert.That(output, Is.EqualTo("oof"));
+        }
+
+        [Test]
+        public void Can_ignore_page_template_and_layout_with_Page_args()
+        {
+            var context = new TemplateContext().Init();
+            
+            context.VirtualFiles.WriteFile("_layout.html", "<html><body>{{ page }}</body></html>");
+            context.VirtualFiles.WriteFile("page.html", "<pre>{{ 12.34 | currency }}</pre>");
+            context.VirtualFiles.WriteFile("page-nolayout.html", "<!--\nlayout: none\n-->\n<pre>{{ 12.34 | currency }}</pre>");
+            context.VirtualFiles.WriteFile("ignore-page.html", "<!--\nignore: page\n-->\n<pre>{{ 12.34 | currency }}</pre>");
+            context.VirtualFiles.WriteFile("ignore-template.html", "<!--\nignore: template\n-->\n<pre>{{ 12.34 | currency }}</pre>");
+            
+            Assert.That(new PageResult(context.GetPage("page")).Result, Is.EqualTo("<html><body><pre>$12.34</pre></body></html>"));
+            Assert.That(new PageResult(context.GetPage("page-nolayout")).Result, Is.EqualTo("<pre>$12.34</pre>"));
+            Assert.That(new PageResult(context.GetPage("ignore-page")).Result, Is.EqualTo("<html><body><pre>{{ 12.34 | currency }}</pre></body></html>"));
+            Assert.That(new PageResult(context.GetPage("ignore-template")).Result, Is.EqualTo("<pre>{{ 12.34 | currency }}</pre>"));
+        }
+
+        [Test]
+        public void Can_comment_out_filters()
+        {
+            var context = new TemplateContext().Init();
+            context.VirtualFiles.WriteFile("page.html", "<pre>currency: {{* 12.34 | currency *}}, date: {{* now *}}</pre>");
+            
+            Assert.That(new PageResult(context.GetPage("page")).Result, Is.EqualTo("<pre>currency: , date: </pre>"));
+        }
 
     }
 }

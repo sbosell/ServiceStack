@@ -4,8 +4,11 @@ using Funq;
 using NUnit.Framework;
 using ServiceStack.Data;
 using ServiceStack.Formats;
+using ServiceStack.Host;
 using ServiceStack.IO;
 using ServiceStack.OrmLite;
+using ServiceStack.Templates;
+using ServiceStack.Testing;
 using ServiceStack.Text;
 
 namespace ServiceStack.WebHost.Endpoints.Tests.TemplateTests
@@ -40,12 +43,12 @@ namespace ServiceStack.WebHost.Endpoints.Tests.TemplateTests
     {
         class AppHost : AppSelfHostBase
         {
-            public AppHost() : base(nameof(TemplateIntegrationTests), typeof(MyTemplateServices).GetAssembly()) {}
+            public AppHost() : base(nameof(TemplateIntegrationTests), typeof(MyTemplateServices).Assembly) {}
 
             public readonly List<IVirtualPathProvider> TemplateFiles = new List<IVirtualPathProvider>
             {
                 new MemoryVirtualFiles(),
-                new ResourceVirtualFiles(typeof(HtmlFormat).GetAssembly()),
+                new ResourceVirtualFiles(typeof(HtmlFormat).Assembly),
             };
             public override List<IVirtualPathProvider> GetVirtualFileSources() => TemplateFiles;
 
@@ -77,7 +80,7 @@ namespace ServiceStack.WebHost.Endpoints.Tests.TemplateTests
                     },
                     TemplateFilters =
                     {
-                        new TemplateDbFilters(),
+                        new TemplateDbFiltersAsync(),
                         new TemplateAutoQueryFilters(),
                     },
                 });
@@ -354,13 +357,16 @@ CONSH: Consolidated Holdings, UK
         }
 
         [Test]
-        public void Can_call_customer_with_json_extension_to_force_ContentType()
+        public void Can_call_customer_with_csv_extension_to_force_ContentType()
         {
-            var html = BaseUrl.CombineWith("api", "customers").AddQueryParam("limit", 1).GetStringFromUrl();
+            var json = BaseUrl.CombineWith("api", "customers").AddQueryParam("limit", 1).GetStringFromUrl();
+            Assert.That(json, Does.StartWith("["));
+            
+            var html = BaseUrl.CombineWith("api", "customers.html").AddQueryParam("limit", 1).GetStringFromUrl();
             Assert.That(html, Does.StartWith("<"));
             
-            var json = BaseUrl.CombineWith("api", "customers.json").AddQueryParam("limit", 1).GetStringFromUrl();
-            Assert.That(json, Does.StartWith("["));
+            var csv = BaseUrl.CombineWith("api", "customers.csv").AddQueryParam("limit", 1).GetStringFromUrl();
+            Assert.That(csv, Does.StartWith("CustomerId,"));
         }
 
         [Test]
@@ -372,6 +378,46 @@ CONSH: Consolidated Holdings, UK
             Assert.That(customer.CompanyName, Is.EqualTo("Alfreds Futterkiste"));
             Assert.That(customer.City, Is.EqualTo("Berlin"));
             Assert.That(customer.Country, Is.EqualTo("Germany"));
+        }
+
+        [Test]
+        public void Can_use_ifAuthenticated_filters_when_authenticated()
+        {
+            var context = new TemplateContext
+            {
+                TemplateFilters = { new TemplateServiceStackFilters() },
+                Args =
+                {
+                    [TemplateConstants.Request] = new MockHttpRequest
+                    {
+                        Items =
+                        {
+                            [Keywords.Session] = new AuthUserSession { DisplayName = "Auth User", IsAuthenticated = true }
+                        }
+                    }
+                }
+            }.Init();
+            
+            Assert.That(context.EvaluateTemplate("{{ isAuthenticated }}"), Is.EqualTo("True"));
+            Assert.That(context.EvaluateTemplate("{{ ifAuthenticated | show: Y }}"), Is.EqualTo("Y"));
+            Assert.That(context.EvaluateTemplate("{{ ifNotAuthenticated | show: N }}"), Is.EqualTo(""));
+            Assert.That(context.EvaluateTemplate("{{ 1 | onlyIfAuthenticated }}"), Is.EqualTo("1"));
+            Assert.That(context.EvaluateTemplate("{{ 1 | endIfAuthenticated }}"), Is.EqualTo(""));
+        }
+
+        [Test]
+        public void Can_use_ifAuthenticated_filters_when_not_authenticated()
+        {
+            var context = new TemplateContext
+            {
+                TemplateFilters = { new TemplateServiceStackFilters() },
+            }.Init();
+            
+            Assert.That(context.EvaluateTemplate("{{ isAuthenticated }}"), Is.EqualTo("False"));
+            Assert.That(context.EvaluateTemplate("{{ ifAuthenticated | show: Y }}"), Is.EqualTo(""));
+            Assert.That(context.EvaluateTemplate("{{ ifNotAuthenticated | show: N }}"), Is.EqualTo("N"));
+            Assert.That(context.EvaluateTemplate("{{ 1 | onlyIfAuthenticated }}"), Is.EqualTo(""));
+            Assert.That(context.EvaluateTemplate("{{ 1 | endIfAuthenticated }}"), Is.EqualTo("1"));
         }
     }
 }

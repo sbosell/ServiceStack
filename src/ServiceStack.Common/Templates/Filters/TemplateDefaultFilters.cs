@@ -114,9 +114,9 @@ namespace ServiceStack.Templates
             return false;
         }
 
-        [HandleUnknownValue] public object end() => StopExecution.Value;
+        [HandleUnknownValue] public StopExecution end() => StopExecution.Value;
         [HandleUnknownValue] public Task end(TemplateScopeContext scope, object ignore) => TypeConstants.EmptyTask;
-        [HandleUnknownValue] public object end(object ignore) => StopExecution.Value;
+        [HandleUnknownValue] public StopExecution end(object ignore) => StopExecution.Value;
 
         [HandleUnknownValue] public object endIfNull(object target) => isNull(target) ? StopExecution.Value : target;
         [HandleUnknownValue] public object endIfNull(object ignoreTarget, object target) => isNull(target) ? StopExecution.Value : target;
@@ -250,16 +250,16 @@ namespace ServiceStack.Templates
         [HandleUnknownValue] public bool isStringDictionary(object target) => target is IDictionary<string, string>;
 
         [HandleUnknownValue] public bool isType(object target, string typeName) => typeName.EqualsIgnoreCase(target?.GetType()?.Name);
-        [HandleUnknownValue] public bool isNumber(object target) => target?.GetType()?.IsNumericType() == true;
-        [HandleUnknownValue] public bool isRealNumber(object target) => target?.GetType()?.IsRealNumberType() == true;
-        [HandleUnknownValue] public bool isEnum(object target) => target?.GetType()?.IsEnum() == true;
-        [HandleUnknownValue] public bool isArray(object target) => target?.GetType()?.IsArray() == true;
-        [HandleUnknownValue] public bool isAnonObject(object target) => target?.GetType()?.IsAnonymousType() == true;
-        [HandleUnknownValue] public bool isClass(object target) => target?.GetType()?.IsClass() == true;
-        [HandleUnknownValue] public bool isValueType(object target) => target?.GetType()?.IsValueType() == true;
-        [HandleUnknownValue] public bool isDto(object target) => target?.GetType()?.IsDto() == true;
-        [HandleUnknownValue] public bool isTuple(object target) => target?.GetType()?.IsTuple() == true;
-        [HandleUnknownValue] public bool isKeyValuePair(object target) => "KeyValuePair`2".Equals(target?.GetType()?.Name);
+        [HandleUnknownValue] public bool isNumber(object target) => target?.GetType().IsNumericType() == true;
+        [HandleUnknownValue] public bool isRealNumber(object target) => target?.GetType().IsRealNumberType() == true;
+        [HandleUnknownValue] public bool isEnum(object target) => target?.GetType().IsEnum == true;
+        [HandleUnknownValue] public bool isArray(object target) => target?.GetType().IsArray == true;
+        [HandleUnknownValue] public bool isAnonObject(object target) => target?.GetType().IsAnonymousType() == true;
+        [HandleUnknownValue] public bool isClass(object target) => target?.GetType().IsClass == true;
+        [HandleUnknownValue] public bool isValueType(object target) => target?.GetType().IsValueType == true;
+        [HandleUnknownValue] public bool isDto(object target) => target?.GetType().IsDto() == true;
+        [HandleUnknownValue] public bool isTuple(object target) => target?.GetType().IsTuple() == true;
+        [HandleUnknownValue] public bool isKeyValuePair(object target) => "KeyValuePair`2".Equals(target?.GetType().Name);
 
         [HandleUnknownValue] public int length(object target) => target is IEnumerable e ? e.Cast<object>().Count() : 0;
 
@@ -313,16 +313,56 @@ namespace ServiceStack.Templates
         public IRawString pass(string target) => ("{{ " + target + " }}").ToRawString();
 
         public IEnumerable join(IEnumerable<object> values) => join(values, ",");
-        public IEnumerable join(IEnumerable<object> values, string delimiter) => values.Map(x => x.ToString()).Join(delimiter);
+        public IEnumerable join(IEnumerable<object> values, string delimiter) => values.Map(x => x.AsString()).Join(delimiter);
 
         public IEnumerable<object> reverse(TemplateScopeContext scope, IEnumerable<object> original) => original.Reverse();
 
         public KeyValuePair<string, object> keyValuePair(string key, object value) => new KeyValuePair<string, object>(key, value);
 
-        public object addToStart(TemplateScopeContext scope, object value, string argName)
+        public IgnoreResult prependTo(TemplateScopeContext scope, string value, string argName)
         {
             if (value == null)
-                return null;
+                return IgnoreResult.Value;
+
+            if (scope.ScopedParams.TryGetValue(argName, out object oString))
+            {
+                if (oString is string s)
+                {
+                    scope.ScopedParams[argName] = value + s;
+                }
+            }
+            else
+            {
+                scope.ScopedParams[argName] = value;
+            }
+            
+            return IgnoreResult.Value;
+        }
+
+        public IgnoreResult appendTo(TemplateScopeContext scope, string value, string argName)
+        {
+            if (value == null)
+                return IgnoreResult.Value;
+
+            if (scope.ScopedParams.TryGetValue(argName, out object oString))
+            {
+                if (oString is string s)
+                {
+                    scope.ScopedParams[argName] = s + value;
+                }
+            }
+            else
+            {
+                scope.ScopedParams[argName] = value;
+            }
+            
+            return IgnoreResult.Value;
+        }
+        
+        public IgnoreResult addToStart(TemplateScopeContext scope, object value, string argName)
+        {
+            if (value == null)
+                return IgnoreResult.Value;
             
             if (scope.ScopedParams.TryGetValue(argName, out object collection))
             {
@@ -352,10 +392,10 @@ namespace ServiceStack.Templates
             return IgnoreResult.Value;
         }
 
-        public object addTo(TemplateScopeContext scope, object value, string argName) 
+        public IgnoreResult addTo(TemplateScopeContext scope, object value, string argName) 
         {
             if (value == null)
-                return null;
+                return IgnoreResult.Value;
             
             if (scope.ScopedParams.TryGetValue(argName, out object collection))
             {
@@ -447,7 +487,7 @@ namespace ServiceStack.Templates
             return value;
         }
 
-        public object assignTo(TemplateScopeContext scope, object value, string argName)
+        public IgnoreResult assignTo(TemplateScopeContext scope, object value, string argName)
         {
             scope.ScopedParams[argName] = value;
             return IgnoreResult.Value;
@@ -478,8 +518,7 @@ namespace ServiceStack.Templates
         public Task forEach(TemplateScopeContext scope, object target, object items) => forEach(scope, target, items, null);
         public async Task forEach(TemplateScopeContext scope, object target, object items, object scopeOptions)
         {
-            var objs = items as IEnumerable;
-            if (objs != null)
+            if (items is IEnumerable objs)
             {
                 var scopedParams = scope.GetParamsWithItemBinding(nameof(select), scopeOptions, out string itemBinding);
 
@@ -775,7 +814,7 @@ namespace ServiceStack.Templates
             if (target == null || names == null)
                 return null;
             
-            if (target is string || target.GetType().IsValueType())
+            if (target is string || target.GetType().IsValueType)
                 throw new NotSupportedException(nameof(selectFields) + " requires an IEnumerable, IDictionary or POCO Target, received instead: " + target.GetType().Name);
 
             var namesList = names is IEnumerable eKeys
@@ -1024,19 +1063,44 @@ namespace ServiceStack.Templates
             }
             return target;
         }
+
+        public string dirPath(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || filePath[filePath.Length - 1] == '/')
+                return null;
+
+            var lastDirPos = filePath.LastIndexOf('/');
+            return lastDirPos >= 0
+                ? filePath.Substring(0, lastDirPos)
+                : null;
+        }
+
+        public string resolveAsset(TemplateScopeContext scope, string virtualPath)
+        {
+            if (string.IsNullOrEmpty(virtualPath))
+                return string.Empty;
+
+            if (!scope.Context.Args.TryGetValue(TemplateConstants.AssetsBase, out object assetsBase))
+                return virtualPath;
+
+            return virtualPath[0] == '/'
+                ? assetsBase.ToString().CombineWith(virtualPath).ResolvePaths()
+                : assetsBase.ToString().CombineWith(dirPath(scope.Page.VirtualPath), virtualPath).ResolvePaths();
+        }
    }
 
     public partial class TemplateDefaultFilters //Methods named after common keywords breaks intelli-sense when trying to use them        
     {
+        [HandleUnknownValue] public object @if(object test) => test is bool b && b ? (object) IgnoreResult.Value : StopExecution.Value;
         [HandleUnknownValue] public object @if(object returnTarget, object test) => test is bool b && b ? returnTarget : null;
         [HandleUnknownValue] public object @default(object returnTaget, object elseReturn) => returnTaget ?? elseReturn;
 
         public object @throw(TemplateScopeContext scope, string message) => new Exception(message).InStopFilter(scope, null);
         public object @throw(TemplateScopeContext scope, string message, object options) => new Exception(message).InStopFilter(scope, options);
         
-        public object @return(TemplateScopeContext scope) => @return(scope, null, null);
-        public object @return(TemplateScopeContext scope, object returnValue) => @return(scope, returnValue, null);
-        public object @return(TemplateScopeContext scope, object returnValue, object returnArgs)
+        [HandleUnknownValue] public StopExecution @return(TemplateScopeContext scope) => @return(scope, null, null);
+        [HandleUnknownValue] public StopExecution @return(TemplateScopeContext scope, object returnValue) => @return(scope, returnValue, null);
+        [HandleUnknownValue] public StopExecution @return(TemplateScopeContext scope, object returnValue, object returnArgs)
         {
             scope.PageResult.Args[TemplateConstants.Return] = returnValue;
             scope.PageResult.Args[TemplateConstants.ReturnArgs] = returnArgs;

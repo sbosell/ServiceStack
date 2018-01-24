@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Web;
 using ServiceStack.Host;
 using ServiceStack.IO;
+using ServiceStack.Logging;
 using ServiceStack.Text;
 using ServiceStack.Web;
 
@@ -40,7 +41,7 @@ namespace ServiceStack
         {
             this.Headers = new Dictionary<string, string>();
             this.Cookies = new List<Cookie>();
-            this.ResponseFilter = ContentTypes.Instance;
+            this.ResponseFilter = HostContext.AppHost?.ContentTypes ?? ContentTypes.Instance;
 
             this.Response = response;
             this.ContentType = contentType;
@@ -220,8 +221,8 @@ namespace ServiceStack
 
         public HttpStatusCode StatusCode
         {
-            get { return (HttpStatusCode)Status; }
-            set { Status = (int)value; }
+            get => (HttpStatusCode)Status;
+            set => Status = (int)value;
         }
 
         public string StatusDescription { get; set; }
@@ -271,24 +272,23 @@ namespace ServiceStack
                 {
                     if (response != null)
                     {
-                        var ms = ResponseStream as MemoryStream;
-                        if (ms != null)
+                        if (ResponseStream is MemoryStream ms)
                         {
                             var bytes = ms.ToArray();
                             response.SetContentLength(bytes.Length + paddingLength);
 
-                            responseStream.Write(bytes, 0, bytes.Length); //Write Sync to MemoryStream
+                            await responseStream.WriteAsync(bytes, 0, bytes.Length, token); //Write Sync to MemoryStream
                             return;
                         }
                     }
 
                     await ResponseStream.CopyToAsync(responseStream, token);
-                    return;
                 }
                 finally
                 {
                     DisposeStream();
                 }
+                return;
             }
 
             if (this.ResponseText != null)
@@ -305,8 +305,7 @@ namespace ServiceStack
             if (this.RequestContext == null)
                 throw new ArgumentNullException(nameof(RequestContext));
 
-            var bytesResponse = this.Response as byte[];
-            if (bytesResponse != null)
+            if (this.Response is byte[] bytesResponse)
             {
                 response?.SetContentLength(bytesResponse.Length + paddingLength);
 
@@ -321,9 +320,12 @@ namespace ServiceStack
 
             RequestContext.SetItem("HttpResult", this);
 
-            ResponseFilter.SerializeToStream(this.RequestContext, this.Response, responseStream);
+            if (Response != null || View != null || Template != null) //allow new HttpResult { View = "/default.cshtml" }
+            {
+                await ResponseFilter.SerializeToStreamAsync(this.RequestContext, this.Response, responseStream);
+            }
         }
-
+        
         public bool IsPartialRequest => 
             AllowsPartialResponse && RequestContext.GetHeader(HttpHeaders.Range) != null && GetContentLength() != null;
 
@@ -332,8 +334,7 @@ namespace ServiceStack
             var contentLength = GetContentLength().GetValueOrDefault(int.MaxValue); //Safe as guarded by IsPartialRequest
             var rangeHeader = RequestContext.GetHeader(HttpHeaders.Range);
 
-            long rangeStart, rangeEnd;
-            rangeHeader.ExtractHttpRanges(contentLength, out rangeStart, out rangeEnd);
+            rangeHeader.ExtractHttpRanges(contentLength, out var rangeStart, out var rangeEnd);
 
             if (rangeEnd > contentLength - 1)
                 rangeEnd = contentLength - 1;
@@ -463,6 +464,7 @@ namespace ServiceStack
         public void Dispose()
         {
             DisposeStream();
+            using (Response as IDisposable) {}
         }
     }
 
@@ -479,7 +481,7 @@ namespace ServiceStack
         ProxyRevalidate = 1 << 6,
     }
 
-#if !NETSTANDARD1_6
+#if !NETSTANDARD2_0
     public static class HttpResultExtensions
     {
         public static System.Net.Cookie ToCookie(this HttpCookie httpCookie)

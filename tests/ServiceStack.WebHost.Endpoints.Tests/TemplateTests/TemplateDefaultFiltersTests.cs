@@ -1414,6 +1414,32 @@ dir-file: dir/dir-file.txt
         }
 
         [Test]
+        public void Can_appendTo_existing_string()
+        {
+            var context = new TemplateContext().Init();
+            
+            Assert.That(context.EvaluateTemplate(@"
+{{ 'a' | appendTo: string }}
+{{ 'b' | appendTo: string }}
+{{ 'c' | appendTo: string }}
+{{ string }}
+".NormalizeNewLines()), Is.EqualTo("abc"));
+        }
+
+        [Test]
+        public void Can_prependTo_existing_string()
+        {
+            var context = new TemplateContext().Init();
+            
+            Assert.That(context.EvaluateTemplate(@"
+{{ 'a' | prependTo: string }}
+{{ 'b' | prependTo: string }}
+{{ 'c' | prependTo: string }}
+{{ string }}
+".NormalizeNewLines()), Is.EqualTo("cba"));
+        }
+
+        [Test]
         public void Return_does_stop_all_execution()
         {
             var context = new TemplateContext().Init();
@@ -1433,5 +1459,45 @@ dir-file: dir/dir-file.txt
             }));
         }
 
+        [Test]
+        public void Can_use_resolveAsset_to_resolve_external_paths()
+        {
+            var context = new TemplateContext
+            {
+                Args =
+                {
+                    [TemplateConstants.AssetsBase] = "http://example.com/assets/"
+                }
+            }.Init();
+            
+            Assert.That(context.EvaluateTemplate("{{ 'img/logo.png'  | resolveAsset }}"), Is.EqualTo("http://example.com/assets/img/logo.png"));
+            Assert.That(context.EvaluateTemplate("{{ '/img/logo.png' | resolveAsset }}"), Is.EqualTo("http://example.com/assets/img/logo.png"));
+        }
+
+        [Test]
+        public void Returns_path_when_no_assetsBase_exists()
+        {
+            var context = new TemplateContext().Init();
+            
+            Assert.That(context.EvaluateTemplate("{{ 'img/logo.png'  | resolveAsset }}"), Is.EqualTo("img/logo.png"));
+            Assert.That(context.EvaluateTemplate("{{ '/img/logo.png' | resolveAsset }}"), Is.EqualTo("/img/logo.png"));
+        }
+
+        [Test]
+        public void Can_use_isNull_on_nested_properties()
+        {
+            var sampleModel = new
+            {
+                StringProperty = "Hello",
+                NullStringProperty = (string)null
+            };
+
+            var context = new TemplateContext().Init();
+
+            var args = new Dictionary<string, object> { { "sampleArg", sampleModel } };
+            Assert.That(context.EvaluateTemplate("{{ sampleArg | isNull }}", args), Is.EqualTo("False"));
+            Assert.That(context.EvaluateTemplate("{{ sampleArg.StringProperty | isNull }}", args), Is.EqualTo("False"));
+            Assert.That(context.EvaluateTemplate("{{ sampleArg.NullStringProperty | isNull }}", args), Is.EqualTo("True"));
+        }
     }
 }

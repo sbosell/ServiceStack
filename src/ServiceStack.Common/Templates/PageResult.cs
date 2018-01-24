@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 using ServiceStack.Text;
 using ServiceStack.Web;
 
-#if NETSTANDARD1_3
+#if NETSTANDARD2_0
 using Microsoft.Extensions.Primitives;
 #endif
 
@@ -309,11 +309,17 @@ namespace ServiceStack.Templates
             }
 
             if (Page != null)
+            {
                 await Page.Init();
+                InitPageArgs(Page.Args);
+            }
             else
+            {
                 CodePage.Init();
+                InitPageArgs(CodePage.Args);
+            }
 
-            if (Layout != null)
+            if (Layout != null && !NoLayout)
             {
                 LayoutPage = Page != null
                     ? Context.Pages.ResolveLayoutPage(Page, Layout)
@@ -323,6 +329,15 @@ namespace ServiceStack.Templates
             hasInit = true;
 
             return this;
+        }
+
+        private void InitPageArgs(Dictionary<string, object> pageArgs)
+        {
+            if (pageArgs?.Count > 0)
+            {
+                NoLayout = (pageArgs.TryGetValue("ignore", out object ignore) && "template".Equals(ignore?.ToString())) ||
+                           (pageArgs.TryGetValue("layout", out object layout) && "none".Equals(layout?.ToString()));
+            }
         }
 
         private Task InitIfNewPage(TemplatePage page) => page != Page 
@@ -386,7 +401,7 @@ namespace ServiceStack.Templates
         {
             await page.Init(); //reload modified changes if needed
 
-            stackTrace.Push("Page: " + Page.VirtualPath);
+            stackTrace.Push("Page: " + page.VirtualPath);
             
             foreach (var fragment in page.PageFragments)
             {
@@ -524,50 +539,44 @@ namespace ServiceStack.Templates
 
             if (value == null)
             {
-                if (var.InitialExpression != null && var.InitialExpression.IsBinding)
+                var handlesUnknownValue = HandlesUnknownValue(var);
+                if (!handlesUnknownValue)
                 {
-                    var expr = var.InitialExpression.NameString;
-                    expr = expr.Trim();
-                    var pos = expr.IndexOfAny(VarDelimiters, 0);
-                    if (pos > 0)
+                    if (var.InitialExpression != null && var.InitialExpression.IsBinding)
                     {
-                        var target = expr.Substring(0, pos);
+                        var expr = var.InitialExpression.NameString;
+                        expr = expr.Trim();
+                        var pos = expr.IndexOfAny(VarDelimiters, 0);
+                        if (pos > 0)
+                        {
+                            var target = expr.Substring(0, pos);
 
-                        //allow nested null bindings from an existing target to evaluate to an empty string 
-                        var targetValue = GetValue(target, scope);
-                        if (targetValue != null)
-                            return string.Empty;
+                            //allow nested null bindings from an existing target to evaluate to an empty string 
+                            var targetValue = GetValue(target, scope);
+                            if (targetValue != null)
+                                return string.Empty;
+                        }
                     }
-                }
-                
-                if (!var.Binding.HasValue) 
-                    return null;
 
-                var hasFilterAsBinding = GetFilterAsBinding(var.BindingString, out TemplateFilter filter);
-                if (hasFilterAsBinding != null)
-                {
-                    value = InvokeFilter(hasFilterAsBinding, filter, new object[0], var.BindingString);
-                }
-                else
-                {
-                    var hasContexFilterAsBinding = GetContextFilterAsBinding(var.BindingString, out filter);
-                    if (hasContexFilterAsBinding != null)
+                    if (!var.Binding.HasValue)
+                        return null;
+
+                    var hasFilterAsBinding = GetFilterAsBinding(var.BindingString, out TemplateFilter filter);
+                    if (hasFilterAsBinding != null)
                     {
-                        value = InvokeFilter(hasContexFilterAsBinding, filter, new object[] { scope }, var.BindingString);
+                        value = InvokeFilter(hasFilterAsBinding, filter, new object[0], var.BindingString);
                     }
                     else
                     {
-                        var handlesUnknownValue = false;
-                        if (var.FilterExpressions.Length > 0)
+                        var hasContexFilterAsBinding = GetContextFilterAsBinding(var.BindingString, out filter);
+                        if (hasContexFilterAsBinding != null)
                         {
-                            var filterName = var.FilterExpressions[0].NameString;
-                            var filterArgs = 1 + var.FilterExpressions[0].Args.Count;
-                            handlesUnknownValue = TemplateFilters.Any(x => x.HandlesUnknownValue(filterName, filterArgs)) ||
-                                                  Context.TemplateFilters.Any(x => x.HandlesUnknownValue(filterName, filterArgs));
+                            value = InvokeFilter(hasContexFilterAsBinding, filter, new object[] { scope }, var.BindingString);
                         }
-
-                        if (!handlesUnknownValue)
+                        else
+                        {
                             return null;
+                        }
                     }
                 }
             }
@@ -655,7 +664,8 @@ namespace ServiceStack.Templates
 
                         try
                         {
-                            await (Task)contextBlockInvoker(filter, args);
+                            var taskResponse = (Task)contextBlockInvoker(filter, args);
+                            await taskResponse;
 
                             if (hasFilterTransformers)
                             {
@@ -716,6 +726,9 @@ namespace ServiceStack.Templates
 
                         return IgnoreResult.Value;
                     }
+
+                    if (value is Task<object> valueTask)
+                        value = await valueTask;
                 }
                 catch (StopFilterExecutionException ex)
                 {
@@ -770,6 +783,18 @@ namespace ServiceStack.Templates
                 return string.Empty; // treat as empty value if evaluated to null
 
             return value;
+        }
+
+        private bool HandlesUnknownValue(PageVariableFragment var)
+        {
+            if (var.FilterExpressions.Length > 0)
+            {
+                var filterName = var.FilterExpressions[0].NameString;
+                var filterArgs = 1 + var.FilterExpressions[0].Args.Count;
+                return TemplateFilters.Any(x => x.HandlesUnknownValue(filterName, filterArgs)) 
+                    || Context.TemplateFilters.Any(x => x.HandlesUnknownValue(filterName, filterArgs));
+            }
+            return false;
         }
 
         private string CreateMissingFilterErrorMessage(string filterName)
@@ -930,7 +955,7 @@ namespace ServiceStack.Templates
             {
                 value = binding != null 
                     ? GetValue(binding.BindingString, scope) 
-                    : outValue;
+                    : EvaluateAnyBindings(outValue, scope);
             }
 
             if (unaryOp != null)
@@ -1023,14 +1048,14 @@ namespace ServiceStack.Templates
                 : EvaluateAnyBindings(token, scope);
         }
 
-        internal object GetValue(string name, TemplateScopeContext scopedParams)
+        internal object GetValue(string name, TemplateScopeContext scope)
         {
             if (name == null)
                 throw new ArgumentNullException(nameof(name));
 
             MethodInvoker invoker;
 
-            var value = scopedParams.ScopedParams != null && scopedParams.ScopedParams.TryGetValue(name, out object obj)
+            var value = scope.ScopedParams != null && scope.ScopedParams.TryGetValue(name, out object obj)
                 ? obj
                 : Args.TryGetValue(name, out obj)
                     ? obj
@@ -1044,11 +1069,13 @@ namespace ServiceStack.Templates
                                     ? obj
                                     : (invoker = GetFilterAsBinding(name, out TemplateFilter filter)) != null
                                         ? InvokeFilter(invoker, filter, new object[0], name)
-                                        : null;
+                                        : (invoker = GetContextFilterAsBinding(name, out filter)) != null
+                                             ? InvokeFilter(invoker, filter, new object[]{ scope }, name)
+                                             : null;
 
             if (value is JsBinding binding)
             {
-                return GetValue(binding.BindingString, scopedParams);
+                return GetValue(binding.BindingString, scope);
             }
             
             return value;

@@ -1,4 +1,4 @@
-﻿#if NETSTANDARD1_6
+﻿#if NETSTANDARD2_0
 
 using System;
 using System.Collections.Generic;
@@ -11,7 +11,6 @@ using ServiceStack.Logging;
 
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Extensions;
-using Microsoft.Extensions.Primitives;
 using Microsoft.AspNetCore.Http.Internal;
 using Microsoft.Extensions.DependencyInjection;
 using ServiceStack.Configuration;
@@ -43,10 +42,8 @@ namespace ServiceStack.Host.NetCore
             this.RequestAttributes = attrs;
 
             //Kestrel does not decode '+' into space
-            this.PathInfo = this.OriginalPathInfo = (pathInfo ?? request.Path.Value).Replace("+", " ");  
-            this.PathInfo = HostContext.AppHost.ResolvePathInfo(this, PathInfo, out bool isDirectory);
-            this.IsDirectory = isDirectory;
-            this.IsFile = !isDirectory && HostContext.VirtualFileSources.FileExists(PathInfo);
+            this.PathInfo = this.OriginalPathInfo = (pathInfo ?? request.Path.Value).Replace("+", " ").Replace("%2f", "/");  
+            this.PathInfo = HostContext.AppHost.ResolvePathInfo(this, PathInfo);
         }
 
         public T TryResolve<T>()
@@ -150,32 +147,14 @@ namespace ServiceStack.Host.NetCore
 
         public Dictionary<string, object> Items { get; }
 
-        private INameValueCollection headers;
-        public INameValueCollection Headers
-        {
-            get
-            {
-                if (headers != null)
-                    return headers;
+        private NameValueCollection headers;
+        public NameValueCollection Headers => headers ?? (headers = new NetCoreHeadersCollection(request.Headers));
 
-                return headers = new NetCoreHeadersCollection(request.Headers);
-            }
-        }
+        private NameValueCollection queryString;
+        public NameValueCollection QueryString => queryString ?? (queryString = new NetCoreQueryStringCollection(request.Query));
 
-        private INameValueCollection queryString;
-        public INameValueCollection QueryString
-        {
-            get
-            {
-                if (queryString != null)
-                    return queryString;
-
-                return queryString = new NetCoreQueryStringCollection(request.Query);
-            }
-        }
-
-        private INameValueCollection formData;
-        public INameValueCollection FormData
+        private NameValueCollection formData;
+        public NameValueCollection FormData
         {
             get
             {
@@ -190,7 +169,7 @@ namespace ServiceStack.Host.NetCore
                         nvc.Add(form.Key, form.Value);
                     }
                 }
-                return formData = new NameValueCollectionWrapper(nvc);
+                return formData = nvc;
             }
         }
 
@@ -210,11 +189,9 @@ namespace ServiceStack.Host.NetCore
 
         public string UserHostAddress => request.HttpContext.Connection.RemoteIpAddress.ToString();
 
-        public string RemoteIp => UserHostAddress;
-
         public string Authorization => request.Headers[HttpHeaders.Authorization];
 
-        public bool IsSecureConnection => request.IsHttps;
+        public bool IsSecureConnection => request.IsHttps || XForwardedProtocol == "https";
 
         public string[] AcceptTypes => request.Headers[HttpHeaders.Accept].ToArray();
 
@@ -297,14 +274,46 @@ namespace ServiceStack.Host.NetCore
                 ? null
                 : request.Headers[HttpHeaders.Accept].ToString();
 
+        private string remoteIp;
+        public string RemoteIp => 
+            remoteIp ?? (remoteIp = XForwardedFor ?? (XRealIp ?? UserHostAddress));
+
         
-        public IVirtualFile GetFile() => HostContext.VirtualFileSources.GetFile(PathInfo);
+        private IVirtualFile file;
+        public IVirtualFile GetFile() => file ?? (file = HostContext.VirtualFileSources.GetFile(PathInfo));
 
-        public IVirtualDirectory GetDirectory() => HostContext.VirtualFileSources.GetDirectory(PathInfo);
+        private IVirtualDirectory dir;
+        public IVirtualDirectory GetDirectory() => dir ?? (dir = HostContext.VirtualFileSources.GetDirectory(PathInfo));
 
-        public bool IsDirectory{ get; }
+        private bool? isDirectory;
+        public bool IsDirectory
+        {
+            get
+            {
+                if (isDirectory == null)
+                {
+                    isDirectory = dir != null || HostContext.VirtualFileSources.DirectoryExists(PathInfo);
+                    if (isDirectory == true)
+                        isFile = false;
+                }
+                return isDirectory.Value;
+            }
+        }
 
-        public bool IsFile { get; }
+        private bool? isFile;
+        public bool IsFile
+        {
+            get
+            {
+                if (isFile == null)
+                {
+                    isFile = GetFile() != null;
+                    if (isFile == true)
+                        isDirectory = false;                    
+                }
+                return isFile.Value;
+            }
+        }
     }
 }
 

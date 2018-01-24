@@ -10,9 +10,7 @@ using ServiceStack.Text;
 
 namespace ServiceStack
 {
-#if !(NETFX_CORE || WP || SL5 || PCL || NETSTANDARD1_1 || NETSTANDARD1_6)
     [Serializable]
-#endif
     public class WebServiceException
         : Exception, IHasStatusCode, IHasStatusDescription, IResponseStatusConvertible
     {
@@ -38,8 +36,7 @@ namespace ServiceStack
 
         private void ParseResponseDto()
         {
-            string responseStatus;
-            if (!TryGetResponseStatusFromResponseDto(out responseStatus))
+            if (!TryGetResponseStatusFromResponseDto(out var responseStatus))
             {
                 if (!TryGetResponseStatusFromResponseBody(out responseStatus))
                 {
@@ -137,11 +134,10 @@ namespace ServiceStack
                 if (this.ResponseDto == null)
                     return null;
 
-                var hasResponseStatus = this.ResponseDto as IHasResponseStatus;
-                if (hasResponseStatus != null)
+                if (this.ResponseDto is IHasResponseStatus hasResponseStatus)
                     return hasResponseStatus.ResponseStatus;
 
-                var propertyInfo = this.ResponseDto.GetType().GetPropertyInfo("ResponseStatus");
+                var propertyInfo = this.ResponseDto.GetType().GetProperty("ResponseStatus");
                 return propertyInfo?.GetProperty(this.ResponseDto) as ResponseStatus;
             }
         }

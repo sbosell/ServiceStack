@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Data;
 using System.IO;
 using System.Linq;
-using System.Net;
 using System.Web;
 using System.Threading.Tasks;
 using ServiceStack.Auth;
@@ -12,6 +11,7 @@ using ServiceStack.Caching;
 using ServiceStack.Configuration;
 using ServiceStack.DataAnnotations;
 using ServiceStack.Host.Handlers;
+using ServiceStack.Html;
 using ServiceStack.IO;
 using ServiceStack.Messaging;
 using ServiceStack.Redis;
@@ -21,9 +21,9 @@ using ServiceStack.Web;
 
 namespace ServiceStack
 {
-    public class TemplatePagesFeature : TemplateContext, IPlugin
+    public class TemplatePagesFeature : TemplateContext, IPlugin, IViewEngine
     {
-        public bool DisableHotReload { get; set; }
+        public bool? EnableHotReload { get; set; }
 
         public bool EnableDebugTemplate { get; set; }
         public bool EnableDebugTemplateToAll { get; set; }
@@ -31,6 +31,7 @@ namespace ServiceStack
         public string DebugDefaultTemplate { get; set; }
         
         public string ApiPath { get; set; }
+        public string ApiDefaultContentType { get; set; } = MimeTypes.Json;
 
         public List<string> IgnorePaths { get; set; } = new List<string>
         {
@@ -73,18 +74,28 @@ namespace ServiceStack
             appHost.Register(Pages);
             appHost.Register(this);
             appHost.CatchAllHandlers.Add(RequestHandler);
+            
+            InitViewPages(appHost);
 
-            if (!DisableHotReload)
-                appHost.RegisterService(typeof(TemplatePagesServices));
+            if (EnableHotReload.GetValueOrDefault(DebugMode))
+            {
+                appHost.RegisterService(typeof(TemplateHotReloadService));
+
+                // Also enable hot-fileloader.js for hot reloading when static files changed in /wwwroot
+                if (!appHost.Plugins.Any(x => x is HotReloadFeature)) 
+                {
+                    appHost.RegisterService(typeof(HotReloadFilesService));
+                }
+            }
             
             if (!string.IsNullOrEmpty(ApiPath))
-                appHost.RegisterService(typeof(TemplatePagesApiServices), 
+                appHost.RegisterService(typeof(TemplateApiPagesService), 
                     (ApiPath[0] == '/' ? ApiPath : '/' + ApiPath).CombineWith("/{PageName}/{PathInfo*}"));
 
             if (DebugMode || EnableDebugTemplate || EnableDebugTemplateToAll)
             {
-                appHost.RegisterService(typeof(MetadataTemplateServices), MetadataTemplateServices.Route);
-                appHost.GetPlugin<MetadataFeature>().AddDebugLink(MetadataTemplateServices.Route, "Debug Templates");
+                appHost.RegisterService(typeof(TemplateMetadataDebugService), TemplateMetadataDebugService.Route);
+                appHost.GetPlugin<MetadataFeature>().AddDebugLink(TemplateMetadataDebugService.Route, "Debug Templates");
             }
 
             Init();
@@ -116,6 +127,11 @@ namespace ServiceStack
             {
                 if (page.File.Name.StartsWith("_"))
                     return new ForbiddenHttpHandler();
+
+                //If it's a dir index page and doesn't have a trailing '/' let it pass through to RedirectDirectoriesToTrailingSlashes
+                if (pathInfo[pathInfo.Length - 1] != '/' && pathInfo.Substring(1) == page.File.Directory?.VirtualPath)
+                    return null;
+
                 return new TemplatePageHandler(page);
             }
 
@@ -128,10 +144,130 @@ namespace ServiceStack
             
             return null;
         }
+
+        private readonly ConcurrentDictionary<string, TemplatePage> viewPagesMap = new ConcurrentDictionary<string, TemplatePage>();
+
+        private void InitViewPages(IAppHost appHost)
+        {
+            var viewsDir = VirtualFiles.GetDirectory("Views");
+            if (viewsDir == null)
+                return;
+
+            var htmlFormat = PageFormats.First(x => x is HtmlPageFormat);
+
+            var files = viewsDir.GetAllMatchingFiles("*." + htmlFormat.Extension);
+            foreach (var file in files)
+            {
+                if (file.Name.StartsWith("_")) // _layout.html or _partial.html which can have duplicate names
+                    continue;
+                
+                var viewName = file.Name.WithoutExtension();
+                if (viewPagesMap.TryGetValue(viewName, out var existingFile))
+                    throw new NotSupportedException($"Multiple views found named '{file.Name}' in '{file.VirtualPath}' and '{existingFile.VirtualPath}'");
+
+                viewPagesMap[viewName] = new TemplatePage(this, file, htmlFormat);
+            }
+
+            if (viewPagesMap.Count > 0)
+            {
+                appHost.ViewEngines.Add(this);
+            }
+        }
+
+        public TemplatePage GetViewPage(string viewName)
+        {
+            return viewPagesMap.TryGetValue(viewName, out var view) ? view : null;
+        }
+
+        public bool HasView(string viewName, IRequest httpReq = null)
+        {
+            return GetCodePage("Views/" + viewName) != null || GetViewPage(viewName) != null;
+        }
+
+        public string RenderPartial(string pageName, object model, bool renderHtml, StreamWriter writer = null, IHtmlContext htmlHelper = null)
+        {
+            var codePage = htmlHelper?.HttpRequest != null 
+                ? htmlHelper.HttpRequest.GetCodePage("Views/" + pageName) 
+                : GetCodePage("Views/" + pageName);
+
+            var viewPage = codePage == null ? GetViewPage(pageName) : null;
+
+            if (codePage == null && viewPage == null)
+                return null;
+            
+            var output = codePage != null 
+                ? new PageResult(codePage) { Model = model }.Result
+                : new PageResult(viewPage) { Model = model }.Result;
+
+            if (writer != null)
+            {
+                writer.Write(output);
+                writer.Flush();
+                return null;
+            }
+
+            return output;
+        }
+
+        public async Task<bool> ProcessRequestAsync(IRequest req, object dto, Stream outputStream)
+        {
+            if (dto is IHttpResult httpResult)
+                dto = httpResult.Response;
+            
+            var viewNames = new List<string>
+            {
+                req.OperationName,
+                dto.GetType().Name,
+            };
+            
+            if (req.GetItem(Keywords.View) is string viewName)
+                viewNames.Insert(0, viewName);
+
+            TemplateCodePage codePage = null;
+            TemplatePage viewPage = null;
+
+            foreach (var name in viewNames)
+            {
+                codePage = req.GetCodePage("Views/" + name);
+                if (codePage != null)
+                    break;
+            }
+
+            if (codePage == null)
+            {
+                foreach (var name in viewNames)
+                {
+                    viewPage = GetViewPage(name);
+                    if (viewPage != null)
+                        break;
+                }
+            }
+
+            if (codePage == null && viewPage == null)
+                return false;
+
+            if (codePage != null)
+                codePage.Init();
+            else
+                await viewPage.Init();
+
+            var layoutName = req.GetItem(Keywords.Template) as string;
+            var layoutPage = codePage != null 
+                ? Pages.ResolveLayoutPage(codePage, layoutName)
+                : Pages.ResolveLayoutPage(viewPage, layoutName);
+            
+            var handler = codePage != null
+                ? (HttpAsyncTaskHandler)new TemplateCodePageHandler(codePage, layoutPage) { OutputStream = outputStream, Model = dto }
+                : new TemplatePageHandler(viewPage, layoutPage) { OutputStream = outputStream, Model = dto };
+
+            await handler.ProcessRequestAsync(req, req.Response, req.OperationName);
+
+            return true;
+        }
     }
 
     [ExcludeMetadata]
-    [Route("/templates/hotreload/page")]
+    [Route("/hotreload/templates")]
     public class HotReloadPage : IReturn<HotReloadPageResponse>
     {
         public string Path { get; set; }
@@ -147,15 +283,15 @@ namespace ServiceStack
 
     [DefaultRequest(typeof(HotReloadPage))]
     [Restrict(VisibilityTo = RequestAttributes.None)]
-    public class TemplatePagesServices : Service
+    public class TemplateHotReloadService : Service
     {
+        public static TimeSpan LongPollDuration = TimeSpan.FromSeconds(60);
+        public static TimeSpan CheckDelay = TimeSpan.FromMilliseconds(50);
+
         public ITemplatePages Pages { get; set; }
 
         public async Task<HotReloadPageResponse> Any(HotReloadPage request)
         {
-            if (!HostContext.DebugMode)
-                throw new NotImplementedException("set 'debug true' in web.settings to enable this service");
-
             var page = Pages.GetPage(request.Path ?? "/");
             if (page == null)
                 throw HttpError.NotFound("Page not found: " + request.Path);
@@ -163,13 +299,26 @@ namespace ServiceStack
             if (!page.HasInit)
                 await page.Init();
 
-            var lastModified = Pages.GetLastModified(page);
+            var startedAt = DateTime.UtcNow;
+            var eTagTicks = string.IsNullOrEmpty(request.ETag) ? (long?) null : long.Parse(request.ETag);
+            var maxLastModified = DateTime.MinValue;
+            var shouldReload = false;
 
-            if (string.IsNullOrEmpty(request.ETag))
-                return new HotReloadPageResponse { ETag = lastModified.Ticks.ToString() };
+            while (DateTime.UtcNow - startedAt < LongPollDuration)
+            {
+                maxLastModified = Pages.GetLastModified(page);
 
-            var shouldReload = lastModified.Ticks > long.Parse(request.ETag);
-            return new HotReloadPageResponse { Reload = shouldReload, ETag = lastModified.Ticks.ToString() };
+                if (eTagTicks == null)
+                    return new HotReloadPageResponse { ETag = maxLastModified.Ticks.ToString() };
+
+                shouldReload = maxLastModified.Ticks > eTagTicks;
+                if (shouldReload)
+                    break;
+
+                await Task.Delay(CheckDelay);
+            }
+
+            return new HotReloadPageResponse { Reload = shouldReload, ETag = maxLastModified.Ticks.ToString() };
         }
     }
 
@@ -182,7 +331,7 @@ namespace ServiceStack
 
     [DefaultRequest(typeof(ApiPages))]
     [Restrict(VisibilityTo = RequestAttributes.None)]
-    public class TemplatePagesApiServices : Service
+    public class TemplateApiPagesService : Service
     {
         public async Task<object> Any(ApiPages request) 
         {
@@ -193,7 +342,8 @@ namespace ServiceStack
                 ? TypeConstants.EmptyStringArray
                 : request.PathInfo.SplitOnLast('.');
 
-            var pathInfo = parts.Length > 1 && Host.ContentTypes.KnownFormats.Contains(parts[1])
+            var hasPathContentType = parts.Length > 1 && Host.ContentTypes.KnownFormats.Contains(parts[1]);
+            var pathInfo = hasPathContentType
                 ? parts[0]
                 : request.PathInfo;
             
@@ -202,11 +352,23 @@ namespace ServiceStack
                 : pathInfo.Split('/');
             
             parts = request.PageName.SplitOnLast('.');
-            var pageName = pathArgs.Length == 0 && parts.Length > 1 && Host.ContentTypes.KnownFormats.Contains(parts[1])
+            var hasPageContentType = pathArgs.Length == 0 && parts.Length > 1 && Host.ContentTypes.KnownFormats.Contains(parts[1]);
+            var pageName = hasPageContentType
                 ? parts[0]
                 : request.PageName;
 
+            // Change .csv download file name
+            base.Request.OperationName = pageName + (pathArgs.Length > 0 ? "_" + string.Join("_", pathArgs) : "");
+            
             var feature = HostContext.GetPlugin<TemplatePagesFeature>();
+
+            if (feature.ApiDefaultContentType != null &&
+                !hasPathContentType &&
+                !hasPageContentType &&
+                base.Request.QueryString["format"] == null && base.Request.ResponseContentType == MimeTypes.Html)
+            {
+                base.Request.ResponseContentType = feature.ApiDefaultContentType;
+            }
 
             var pagePath = feature.ApiPath.CombineWith(pageName).TrimStart('/');
             var page = base.Request.GetPage(pagePath);
@@ -228,6 +390,9 @@ namespace ServiceStack
             if (!pageResult.Args.TryGetValue("return", out object response))
                 throw HttpError.NotFound($"The API Page did not specify a response. Use the 'return' filter to set a return value for the page.");
 
+            if (response is Task<object> responseTask)
+                response = await responseTask;
+            
             var httpResultHeaders = (pageResult.Args.TryGetValue("returnArgs", out object returnArgs) ? returnArgs : null).ToStringDictionary();
 
             var result = new HttpResult(response);
@@ -237,15 +402,16 @@ namespace ServiceStack
     }
 
     [ExcludeMetadata]
-    public class MetadataDebugTemplate : IReturn<string>
+    public class TemplateMetadataDebug : IReturn<string>
     {
         public string Template { get; set; }
         public string AuthSecret { get; set; }
     }
 
-    [DefaultRequest(typeof(MetadataDebugTemplate))]
+    [ReturnExceptionsInJsonAttribute]
+    [DefaultRequest(typeof(TemplateMetadataDebug))]
     [Restrict(VisibilityTo = RequestAttributes.None)]
-    public class MetadataTemplateServices : Service
+    public class TemplateMetadataDebugService : Service
     {
         public static string Route = "/metadata/debug"; 
         
@@ -274,6 +440,8 @@ User:
   - LastName              {{ userSession | select: { it.LastName } }}
   - Is Admin              {{ userHasRole('Admin') }}
   - Has Permission        {{ userHasPermission('ThePermission') }}
+
+Plugins: {{ plugins | select: \n  - { it | typeName } }}
 </pre></td><td style='width:50%'> 
 {{ meta.Operations | take(10) | map('{ Request: it.Name, Response: it.ResponseType.Name, Service: it.ServiceType.Name }') | htmlDump({ caption: 'First 10 Services'}) }}
 <table><caption>Network Information</caption>
@@ -281,7 +449,7 @@ User:
 <td><pre>{{ networkIpv4Addresses | select: \n{ it } }}</pre></td><td><pre>{{ networkIpv6Addresses | select: \n{ it } }}</pre><td></tr></pre></td>
 </tr></table>";
         
-        public object Any(MetadataDebugTemplate request)
+        public object Any(TemplateMetadataDebug request)
         {
             if (string.IsNullOrEmpty(request.Template))
                 return null;
@@ -316,7 +484,7 @@ User:
             return new HttpResult(result) { ContentType = MimeTypes.PlainText }; 
         }
 
-        public object GetHtml(MetadataDebugTemplate request)
+        public object GetHtml(TemplateMetadataDebug request)
         {
             var feature = HostContext.GetPlugin<TemplatePagesFeature>();
             if (!HostContext.DebugMode && !feature.EnableDebugTemplateToAll)
@@ -346,6 +514,8 @@ User:
     {
         private readonly TemplatePage page;
         private readonly TemplatePage layoutPage;
+        public object Model { get; set; }
+        public Stream OutputStream { get; set; }
 
         public TemplatePageHandler(TemplatePage page, TemplatePage layoutPage = null)
         {
@@ -359,11 +529,12 @@ User:
             var result = new PageResult(page)
             {
                 Args = httpReq.GetTemplateRequestParams(),
-                LayoutPage = layoutPage
+                LayoutPage = layoutPage,
+                Model = Model,
             };
             try
             {
-                await result.WriteToAsync(httpRes.OutputStream);
+                await result.WriteToAsync(OutputStream ?? httpRes.OutputStream);
             }
             catch (Exception ex)
             {
@@ -376,6 +547,8 @@ User:
     {
         private readonly TemplateCodePage page;
         private readonly TemplatePage layoutPage;
+        public object Model { get; set; }
+        public Stream OutputStream { get; set; }
 
         public TemplateCodePageHandler(TemplateCodePage page, TemplatePage layoutPage = null)
         {
@@ -385,19 +558,19 @@ User:
 
         public override async Task ProcessRequestAsync(IRequest httpReq, IResponse httpRes, string operationName)
         {
-            var requiresRequest = page as IRequiresRequest;
-            if (requiresRequest != null)
+            if (page is IRequiresRequest requiresRequest)
                 requiresRequest.Request = httpReq;
 
             var result = new PageResult(page)
             {
                 Args = httpReq.GetTemplateRequestParams(),
-                LayoutPage = layoutPage
+                LayoutPage = layoutPage,
+                Model = Model,
             };
 
             try
             {
-                await result.WriteToAsync(httpRes.OutputStream);
+                await result.WriteToAsync(OutputStream ?? httpRes.OutputStream);
             }
             catch (Exception ex)
             {
@@ -414,14 +587,12 @@ User:
             ContentType = MimeTypes.MarkdownText;
         }
 
-        private static readonly MarkdownSharp.Markdown markdown = new MarkdownSharp.Markdown();
-
         public static async Task<Stream> TransformToHtml(Stream markdownStream)
         {
             using (var reader = new StreamReader(markdownStream))
             {
                 var md = await reader.ReadToEndAsync();
-                var html = markdown.Transform(md);
+                var html = MarkdownConfig.Transformer.Transform(md);
                 return MemoryStreamFactory.GetStream(html.ToUtf8Bytes());
             }
         }
@@ -550,12 +721,17 @@ User:
         
         public static TemplateCodePage GetCodePage(this IRequest request, string virtualPath)
         {
-            return HostContext.GetPlugin<TemplatePagesFeature>().GetCodePage(virtualPath).With(request);
+            return HostContext.AssertPlugin<TemplatePagesFeature>().GetCodePage(virtualPath).With(request);
         }
         
         public static TemplatePage GetPage(this IRequest request, string virtualPath)
         {
-            return HostContext.GetPlugin<TemplatePagesFeature>().GetPage(virtualPath);
+            return HostContext.AssertPlugin<TemplatePagesFeature>().GetPage(virtualPath);
+        }
+        
+        public static TemplatePage OneTimePage(this IRequest request, string contents, string ext=null)
+        {
+            return HostContext.AssertPlugin<TemplatePagesFeature>().OneTimePage(contents, ext);
         }
         
         public static TemplateCodePage With(this TemplateCodePage page, IRequest request)

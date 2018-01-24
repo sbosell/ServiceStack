@@ -11,6 +11,7 @@ using ServiceStack.Auth;
 using ServiceStack.Data;
 using ServiceStack.OrmLite;
 using ServiceStack.Text;
+using ServiceStack.Web;
 
 namespace CheckHttpListener
 {
@@ -49,19 +50,25 @@ namespace CheckHttpListener
             Plugins.Add(new AdminFeature());
 
             Plugins.Add(new AuthFeature(() => new AuthUserSession(),
-                new [] { new BasicAuthProvider(AppSettings) })
+                new[] { new BasicAuthProvider(AppSettings) })
             {
-                ServiceRoutes = new Dictionary<Type, string[]> {
-                  { typeof(AuthenticateService), new[] { "/api/auth", "/api/auth/{provider}" } },
-                }
+                //ServiceRoutes = new Dictionary<Type, string[]> {
+                //  { typeof(AuthenticateService), new[] { "/api/auth", "/api/auth/{provider}" } },
+                //}
             });
+
+            Plugins.Add(new RequestLogsFeature());
 
             SetConfig(new HostConfig
             {
+                HandlerFactoryPath = "api",
                 CompressFilesWithExtensions = { "html", "js" },
                 DebugMode = true
             });
         }
+
+        public override string ResolvePathInfo(IRequest request, string originalPathInfo) =>
+            base.ResolvePathInfo(request, originalPathInfo.Replace("/testsite", "/TestSite"));
 
 //        public override RouteAttribute[] GetRouteAttributes(Type requestType)
 //        {
@@ -88,11 +95,13 @@ namespace CheckHttpListener
     {
         private static void Main(string[] args)
         {
+            var baseUrl = "http://localhost:8000/";
             var appHost = new AppSelfHost()
                 .Init()
-                .Start("http://127.0.0.1:2222/");
+                .Start(baseUrl);
 
-            Process.Start("http://127.0.0.1:2222/");
+            Console.WriteLine(baseUrl);
+            Process.Start(baseUrl);
             Console.ReadLine();
         }
     }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Runtime.Serialization;
 using System.Threading.Tasks;
 using Check.ServiceInterface;
 using Check.ServiceModel;
@@ -15,6 +16,7 @@ using ServiceStack.Api.OpenApi.Specification;
 using ServiceStack.Api.Swagger;
 using ServiceStack.Auth;
 using ServiceStack.Data;
+using ServiceStack.Formats;
 using ServiceStack.Html;
 using ServiceStack.IO;
 using ServiceStack.MiniProfiler;
@@ -34,7 +36,7 @@ namespace CheckWeb
         /// Initializes a new instance of the <see cref="AppHost"/> class.
         /// </summary>
         public AppHost()
-            : base("CheckWeb", typeof(ErrorsService).Assembly, typeof(HtmlServices).Assembly) { }
+            : base("CheckWeb", typeof(ErrorsService).Assembly, typeof(HtmlServices).Assembly) {}
 
         /// <summary>
         /// Configure the Web Application host.
@@ -42,6 +44,8 @@ namespace CheckWeb
         /// <param name="container">The container.</param>
         public override void Configure(Container container)
         {
+            this.CustomErrorHttpHandlers[HttpStatusCode.NotFound] = new RazorHandler("/Views/TestErrorNotFound");
+
             var nativeTypes = this.GetPlugin<NativeTypesFeature>();
             nativeTypes.MetadataTypesConfig.ExportTypes.Add(typeof(DayOfWeek));
             nativeTypes.MetadataTypesConfig.IgnoreTypes.Add(typeof(IgnoreInMetadataConfig));
@@ -52,8 +56,9 @@ namespace CheckWeb
             {
                 DebugMode = true,
                 //UseHttpsLinks = true,
-                AppendUtf8CharsetOnContentTypes = new HashSet<string> { MimeTypes.Html },
+                AppendUtf8CharsetOnContentTypes = { MimeTypes.Html },
                 UseCamelCase = true,
+                AdminAuthSecret = "secretz",
                 //HandlerFactoryPath = "CheckWeb", //when hosted on IIS
                 //AllowJsConfig = false,
 
@@ -66,12 +71,14 @@ namespace CheckWeb
             });
 
             container.Register<IServiceClient>(c =>
-                new JsonServiceClient("http://localhost:55799/")
-                {
-                    CaptureSynchronizationContext = true,
-                });
+                new JsonServiceClient("http://localhost:55799/"));
 
-            Plugins.Add(new TemplatePagesFeature());
+            Plugins.Add(new TemplatePagesFeature
+            {
+                EnableDebugTemplateToAll = true
+            });
+            
+//            Plugins.Add(new SoapFormat());
 
             //ProxyFetureTests
             Plugins.Add(new ProxyFeature(
@@ -90,7 +97,15 @@ namespace CheckWeb
             Plugins.Add(new AdminFeature());
 
             Plugins.Add(new PostmanFeature());
-            Plugins.Add(new CorsFeature());
+            Plugins.Add(new CorsFeature(
+                allowOriginWhitelist: new[] { "http://localhost", "http://localhost:8080", "http://localhost:56500", "http://test.servicestack.net", "http://null.jsbin.com" },
+                allowCredentials: true,
+                allowedHeaders: "Content-Type, Allow, Authorization, X-Args"));
+
+            Plugins.Add(new ServerEventsFeature
+            {
+                LimitToAuthenticatedUsers = true
+            });
 
             GlobalRequestFilters.Add((req, res, dto) =>
             {
@@ -114,10 +129,26 @@ namespace CheckWeb
             {
                 db.DropAndCreateTable<Rockstar>();
                 db.InsertAll(GetRockstars());
+                
+                db.DropAndCreateTable<AllTypes>();
+                db.Insert(new AllTypes
+                {
+                    Id = 1,
+                    Int = 2,
+                    Long = 3,
+                    Float = 1.1f,
+                    Double = 2.2,
+                    Decimal = 3.3m,
+                    DateTime = DateTime.Now,
+                    Guid = Guid.NewGuid(),
+                    TimeSpan = TimeSpan.FromMilliseconds(1),
+                    String = "String"
+                });
             }
+            
+            Plugins.Add(new MiniProfilerFeature());
 
             var dbFactory = (OrmLiteConnectionFactory)container.Resolve<IDbConnectionFactory>();
-
             dbFactory.RegisterConnection("SqlServer",
                 new OrmLiteConnectionFactory(
                     "Server=localhost;Database=test;User Id=test;Password=test;",
@@ -158,6 +189,19 @@ namespace CheckWeb
             this.ConfigureView(container);
 
             this.StartUpErrors.Add(new ResponseStatus("Mock", "Startup Error"));
+
+            //PreRequestFilters.Add((req, res) =>
+            //{
+            //    if (req.PathInfo.StartsWith("/metadata") || req.PathInfo.StartsWith("/swagger-ui"))
+            //    {
+            //        var session = req.GetSession();
+            //        if (!session.IsAuthenticated)
+            //        {
+            //            res.StatusCode = (int)HttpStatusCode.Unauthorized;
+            //            res.EndRequest();
+            //        }
+            //    }
+            //});
         }
 
         public static Rockstar[] GetRockstars()
@@ -209,18 +253,30 @@ namespace CheckWeb
             Plugins.Add(new AuthFeature(() => new AuthUserSession(),
                 new IAuthProvider[]
                 {
-                    new BasicAuthProvider(AppSettings),
+                    new CredentialsAuthProvider(AppSettings),
+                    new JwtAuthProvider(AppSettings)
+                    {
+                        AuthKey = Convert.FromBase64String("3n/aJNQHPx0cLu/2dN3jWf0GSYL35QlMqgz+LH3hUyA="),
+                        RequireSecureConnection = false,
+                    }, 
                     new ApiKeyAuthProvider(AppSettings),
-                })
-            {
-                ServiceRoutes = new Dictionary<Type, string[]> {
-                  { typeof(AuthenticateService), new[] { "/api/auth", "/api/auth/{provider}" } },
-                }
-            });
+                    new BasicAuthProvider(AppSettings),
+                }));
+            
+            Plugins.Add(new RegistrationFeature());
 
             var authRepo = new OrmLiteAuthRepository(container.Resolve<IDbConnectionFactory>());
             container.Register<IAuthRepository>(c => authRepo);
             authRepo.InitSchema();
+
+            authRepo.CreateUserAuth(new UserAuth
+            {
+                UserName = "test",
+                DisplayName = "Credentials",
+                FirstName = "First",
+                LastName = "Last",
+                FullName = "First Last",
+            }, "test");
         }
 
         /// <summary>
@@ -320,6 +376,9 @@ namespace CheckWeb
             return existingProviders;
         }
     }
+    
+    [Route("/query/alltypes")]
+    public class QueryAllTypes : QueryDb<AllTypes> {}
 
     [Route("/test/html")]
     public class TestHtml : IReturn<TestHtml>
@@ -370,11 +429,40 @@ namespace CheckWeb
     {
         public string PathInfo { get; set; }
     }
+
+    [Route("/return/text")]
+    public class ReturnText
+    {
+        public string Text { get; set; }
+    }
+
     public class MyServices : Service
     {
         //Return default.html for unmatched requests so routing is handled on client
         public object Any(IndexPage request) =>
             new HttpResult(VirtualFileSources.GetFile("default.html"));
+
+        [AddHeader(ContentType = MimeTypes.PlainText)]
+        public object Any(ReturnText request) => request.Text;
+    }
+
+    [Route("/plain-dto")]
+    public class PlainDto : IReturn<PlainDto>
+    {
+        public string Name { get; set; }
+    }
+
+    [Route("/httpresult-dto")]
+    public class HttpResultDto : IReturn<HttpResultDto>
+    {
+        public string Name { get; set; }
+    }
+
+    public class HttpResultServices : Service
+    {
+        public object Any(PlainDto request) => request;
+
+        public object Any(HttpResultDto request) => new HttpResult(request, HttpStatusCode.Created);
     }
 
     public class Global : System.Web.HttpApplication

@@ -53,7 +53,7 @@
         width: 100%;
         font-family: Monaco, Consolas;
         resize:vertical;
-        min-height: 600px;
+        min-height: 630px;
         padding: 10px 10px 0 10px;
     }
     input {
@@ -83,6 +83,22 @@
     }
     .live-template.error {
         border-color: #a94442;
+    }
+    .error .output {
+        padding: 0;
+    }
+    .error textarea {
+    }
+    .alert-danger {
+        color: #721c24;
+        background-color: #f8d7da;
+        border-color: #f5c6cb;
+    }
+    .alert {
+        padding: .75rem 1.25rem;
+        margin-bottom: 1rem;
+        border: 1px solid transparent;
+        border-radius: .25rem;
     }
     pre {
         white-space: pre-wrap;
@@ -115,32 +131,93 @@
     </div>
     <div class="result"><div class="output"></div></div>
 </div>
-<script src="../MiniProfiler/UI/jquip.all.js"></script>
-<script src="../js/ss-utils.js"></script>
 <script>
-$(".live-template").each(function(){
-    var el = $(this)
-    el.find("textarea").on("input", function(){
-
-        var template = el.find("textarea").val();
-        var request = { template: template }
-
-        $.ajax({
-            type: "POST",
-            url: location.pathname,
-            data: JSON.stringify(request),
-            contentType: "application/json",
-            dataType: "html",
-            success: function(data) {
-                el.find(".output").html(data)
-            },
-            error: function(){
-                el.addClass("error")
+    var el = document.querySelector('.live-template');
+    var textarea = document.querySelector('textarea');
+    var output = document.querySelector('.output');
+    textarea.oninput = function () {
+        var template = this.value;
+        
+        fetch(location.pathname, {
+            method: "POST",
+            body: JSON.stringify({ template: template }), //sync with: TemplateMetadataDebug
+            credentials: 'include',
+            headers: {
+                'Accept': 'text/html, */*',
+                'Content-Type': 'application/json'
             }
         })
+        .then(function (res) {
+            if (!res.ok)
+                throw res;
+            
+            return res.text();
+        })
+        .then(function (html) {
+            el.classList.remove('error');
+            output.innerHTML = html;
+        })
+        .catch (function (res) {
+            try {
+                console.log('template error:', res.status, res.statusText);
+                el.classList.add('error');
+                res.text().then(function (text) {
+                    var status = parseResponseStatus(text, res.status + ' ' + res.statusText);
+                    if (status) {
+                        output.innerHTML = '<div class="alert alert-danger"><pre>' + status.errorCode + ' ' + htmlEscape(status.message) +
+                            (status.stackTrace ? '\n\nStackTrace:\n' + htmlEscape(status.stackTrace) : '') + '</pre></div>';
+                    }
+                })
+            } catch(e) {
+                output.innerHTML = '<div class="alert alert-danger"><pre>' + res.status + ' ' + res.statusText + '</pre></div>';
+            }
+        });
+    };
+    textarea.oninput();
+    
+    function parseResponseStatus(json, defaultMsg) {
+        try {
+            var err = JSON.parse(json);
+            return sanitize(err.ResponseStatus || err.responseStatus);
+        } catch (e) {
+            return {
+                message: defaultMsg,
+                __error: { error: e, json: json }
+            };
+        }
+    }
+    function sanitize(status) {
+        if (status["errors"])
+            return status;
+
+        var to = {}, k;
+        for (k in status)
+            to[toCamelCase(k)] = status[k];
         
-    }).trigger("input")
-})
+        to.errors = [];
+        var errors = status.Errors || [];
+        for (var i=0; i<errors.length; i++) {
+            var o = errors[i];
+            var err = {};
+            for (k in o)
+                err[toCamelCase(k)] = o[k];
+            to.errors.push(err);
+        }
+        return to;
+    }
+    function toCamelCase(key) {
+        return !key ? key : key.charAt(0).toLowerCase() + key.substring(1);
+    }
+        
+    function htmlEscape(str) {
+        return (str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
 </script>
 </body>
 </html>

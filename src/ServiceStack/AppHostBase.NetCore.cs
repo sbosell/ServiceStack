@@ -1,9 +1,9 @@
-﻿#if NETSTANDARD1_6
+﻿#if NETSTANDARD2_0
 
 using System;
+using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
-
 using ServiceStack.Web;
 using ServiceStack.Logging;
 using ServiceStack.NetCore;
@@ -63,11 +63,13 @@ namespace ServiceStack
 
         public override void OnConfigLoad()
         {
+            base.OnConfigLoad();
             if (app != null)
             {
                 //Initialize VFS
                 var env = app.ApplicationServices.GetService<IHostingEnvironment>();
                 Config.WebHostPhysicalPath = env.ContentRootPath;
+                Config.DebugMode = env.IsDevelopment();
 
                 //Set VirtualFiles to point to ContentRootPath (Project Folder)
                 VirtualFiles = new FileSystemVirtualFiles(env.ContentRootPath);
@@ -84,9 +86,18 @@ namespace ServiceStack
                 LicenseUtils.RegisterLicense(licenceKeyText);
             }
         }
+        
+        public Func<HttpContext, Task<bool>> NetCoreHandler { get; set; }
 
         public virtual async Task ProcessRequest(HttpContext context, Func<Task> next)
         {
+            if (NetCoreHandler != null)
+            {
+                var handled = await NetCoreHandler(context);
+                if (handled)
+                    return;
+            }
+            
             //Keep in sync with Kestrel/AppSelfHostBase.cs
             var operationName = context.Request.GetOperationName().UrlDecode() ?? "Home";
             var pathInfo = context.Request.Path.HasValue
@@ -97,21 +108,45 @@ namespace ServiceStack
             if (!string.IsNullOrEmpty(mode))
             {
                 if (pathInfo.IndexOf(mode, StringComparison.Ordinal) != 1)
+                {
                     await next();
+                    return;
+                }
 
                 pathInfo = pathInfo.Substring(mode.Length + 1);
             }
 
             RequestContext.Instance.StartRequestContext();
 
-            var httpReq = new NetCoreRequest(context, operationName, RequestAttributes.None, pathInfo);
-            httpReq.RequestAttributes = httpReq.GetAttributes();
+            NetCoreRequest httpReq;
+            IResponse httpRes;
+            System.Web.IHttpHandler handler;
 
-            var httpRes = httpReq.Response;
-            var handler = HttpHandlerFactory.GetHandler(httpReq);
+            try 
+            {
+                httpReq = new NetCoreRequest(context, operationName, RequestAttributes.None, pathInfo); 
+                httpReq.RequestAttributes = httpReq.GetAttributes();
+                
+                httpRes = httpReq.Response;
+                handler = HttpHandlerFactory.GetHandler(httpReq);
+            } 
+            catch (Exception ex) //Request Initialization error
+            {
+                var logFactory = context.Features.Get<ILoggerFactory>();
+                if (logFactory != null)
+                {
+                    var log = logFactory.CreateLogger(GetType());
+                    log.LogError(default(EventId), ex, ex.Message);
+                }
 
-            var serviceStackHandler = handler as IServiceStackHandler;
-            if (serviceStackHandler != null)
+                context.Response.ContentType = MimeTypes.PlainText;
+                await context.Response.WriteAsync($"{ex.GetType().Name}: {ex.Message}");
+                if (Config.DebugMode)
+                    await context.Response.WriteAsync($"\nStackTrace:\n{ex.StackTrace}");
+                return;
+            }
+
+            if (handler is IServiceStackHandler serviceStackHandler)
             {
                 if (serviceStackHandler is NotFoundHttpHandler)
                 {
@@ -122,8 +157,7 @@ namespace ServiceStack
                 if (!string.IsNullOrEmpty(serviceStackHandler.RequestName))
                     operationName = serviceStackHandler.RequestName;
 
-                var restHandler = serviceStackHandler as RestHandler;
-                if (restHandler != null)
+                if (serviceStackHandler is RestHandler restHandler)
                 {
                     httpReq.OperationName = operationName = restHandler.RestPath.RequestType.GetOperationName();
                 }
@@ -135,8 +169,11 @@ namespace ServiceStack
                 catch (Exception ex)
                 {
                     var logFactory = context.Features.Get<ILoggerFactory>();
-                    var log = logFactory.CreateLogger(GetType());
-                    log.LogError(default(EventId), ex, ex.Message);
+                    if (logFactory != null)
+                    {
+                        var log = logFactory.CreateLogger(GetType());
+                        log.LogError(default(EventId), ex, ex.Message);
+                    }
                 }
                 finally
                 {
@@ -152,6 +189,10 @@ namespace ServiceStack
 
         public override string MapProjectPath(string relativePath)
         {
+            var env = app?.ApplicationServices.GetService<IHostingEnvironment>();
+            if (env?.ContentRootPath != null && relativePath?.StartsWith("~") == true)
+                return Path.GetFullPath(env.ContentRootPath.CombineWith(relativePath.Substring(1)));
+
             return relativePath.MapHostAbsolutePath();
         }
 
@@ -172,8 +213,7 @@ namespace ServiceStack
         {
             if (httpContext != null)
             {
-                object oRequest;
-                if (httpContext.Items.TryGetValue(Keywords.IRequest, out oRequest))
+                if (httpContext.Items.TryGetValue(Keywords.IRequest, out var oRequest))
                     return (IRequest) oRequest;
 
                 var req = httpContext.ToRequest();
@@ -182,6 +222,12 @@ namespace ServiceStack
                 return req;
             }
             return null;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            LogManager.LogFactory = null;
         }
     }
 

@@ -445,21 +445,25 @@ namespace ServiceStack.Templates
             return to;
         }
 
-        public IEnumerable<object> orderBy(TemplateScopeContext scope, object target, object filter) => orderBy(scope, target, filter, null);
-        public IEnumerable<object> orderBy(TemplateScopeContext scope, object target, object filter, object scopeOptions) =>
-            orderByInternal(nameof(orderBy), scope, target, filter, scopeOptions);
+        public IEnumerable<object> orderBy(TemplateScopeContext scope, object target, object expression) => orderBy(scope, target, expression, null);
+        public IEnumerable<object> orderBy(TemplateScopeContext scope, object target, object expression, object scopeOptions) =>
+            orderByInternal(nameof(orderBy), scope, target, expression, scopeOptions);
 
-        public IEnumerable<object> orderByDescending(TemplateScopeContext scope, object target, object filter) => orderByDescending(scope, target, filter, null);
-        public IEnumerable<object> orderByDescending(TemplateScopeContext scope, object target, object filter, object scopeOptions) =>
-            orderByInternal(nameof(orderByDescending), scope, target, filter, scopeOptions);
+        public IEnumerable<object> orderByDescending(TemplateScopeContext scope, object target, object expression) => orderByDescending(scope, target, expression, null);
+        public IEnumerable<object> orderByDescending(TemplateScopeContext scope, object target, object expression, object scopeOptions) =>
+            orderByInternal(nameof(orderByDescending), scope, target, expression, scopeOptions);
 
-        public IEnumerable<object> thenBy(TemplateScopeContext scope, object target, object filter) => thenBy(scope, target, filter, null);
-        public IEnumerable<object> thenBy(TemplateScopeContext scope, object target, object filter, object scopeOptions) =>
-            thenByInternal(nameof(thenBy), scope, target, filter, scopeOptions);
+        public IEnumerable<object> orderByDesc(TemplateScopeContext scope, object target, object expression) => orderByDesc(scope, target, expression, null);
+        public IEnumerable<object> orderByDesc(TemplateScopeContext scope, object target, object expression, object scopeOptions) =>
+            orderByInternal(nameof(orderByDescending), scope, target, expression, scopeOptions);
 
-        public IEnumerable<object> thenByDescending(TemplateScopeContext scope, object target, object filter) => thenByDescending(scope, target, filter, null);
-        public IEnumerable<object> thenByDescending(TemplateScopeContext scope, object target, object filter, object scopeOptions) =>
-            thenByInternal(nameof(thenByDescending), scope, target, filter, scopeOptions);
+        public IEnumerable<object> thenBy(TemplateScopeContext scope, object target, object expression) => thenBy(scope, target, expression, null);
+        public IEnumerable<object> thenBy(TemplateScopeContext scope, object target, object expression, object scopeOptions) =>
+            thenByInternal(nameof(thenBy), scope, target, expression, scopeOptions);
+
+        public IEnumerable<object> thenByDescending(TemplateScopeContext scope, object target, object expression) => thenByDescending(scope, target, expression, null);
+        public IEnumerable<object> thenByDescending(TemplateScopeContext scope, object target, object expression, object scopeOptions) =>
+            thenByInternal(nameof(thenByDescending), scope, target, expression, scopeOptions);
 
         class ComparerWrapper : IComparer<object>
         {
@@ -471,14 +475,14 @@ namespace ServiceStack.Templates
         {
             private readonly IEqualityComparer comparer;
             public EqualityComparerWrapper(IEqualityComparer comparer) => this.comparer = comparer;
-            public bool Equals(object x, object y) => comparer.Equals(x, y);
+            public new bool Equals(object x, object y) => comparer.Equals(x, y);
             public int GetHashCode(object obj) => comparer.GetHashCode(obj);
         }
         class EqualityComparerWrapper<T> : IEqualityComparer<object>
         {
             private readonly IEqualityComparer<T> comparer;
             public EqualityComparerWrapper(IEqualityComparer<T> comparer) => this.comparer = comparer;
-            public bool Equals(object x, object y) => comparer.Equals((T)x, (T)y);
+            public new bool Equals(object x, object y) => comparer.Equals((T)x, (T)y);
             public int GetHashCode(object obj) => comparer.GetHashCode((T)obj);
         }
 
